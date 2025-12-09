@@ -252,7 +252,6 @@ public class MainActivity extends AppCompatActivity {
     }
 
     class ServiceAdapter extends BaseAdapter {
-        // ... (适配器代码保持不变，与上一版一致) ...
         @Override
         public int getCount() {
             return serviceList.size();

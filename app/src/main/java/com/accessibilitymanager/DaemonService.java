@@ -80,11 +80,10 @@ public class DaemonService extends Service {
         Intent intent = new Intent(this, MainActivity.class);
         PendingIntent pi = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE);
 
-        // 注意：请确保 res/drawable 下有 ic_launcher 或其他图标
         Notification.Builder builder = new Notification.Builder(this)
-                .setSmallIcon(R.drawable.tile) // 如果报错请改为 R.mipmap.ic_launcher
-                .setContentTitle("无障碍服务守护中")
-                .setContentText("正在后台监控服务状态")
+                .setSmallIcon(R.drawable.tile)
+                .setContentTitle("海绵宝宝，猜猜我有几颗糖~")
+                .setContentText("猜对了两颗都给你！")
                 .setContentIntent(pi);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
