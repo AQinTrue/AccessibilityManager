@@ -1,346 +1,200 @@
 package com.accessibilitymanager;
 
-import android.Manifest;
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.annotation.SuppressLint;
-import android.app.ActivityManager;
-import android.app.NotificationManager;
-import android.app.Service;
-import android.content.ClipData;
-import android.content.ClipboardManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.content.pm.ApplicationInfo;
-import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.database.ContentObserver;
 import android.graphics.Color;
-import android.graphics.drawable.Drawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.Looper;
 import android.os.PowerManager;
 import android.provider.Settings;
-import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.Window;
+import android.view.Window; // 导入 Window
 import android.view.accessibility.AccessibilityManager;
 import android.widget.BaseAdapter;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.ListView;
-import android.widget.ScrollView;
-import android.widget.Switch;
 import android.widget.TextView;
-import android.widget.Toast;
 
-import androidx.appcompat.widget.Toolbar;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.appcompat.app.ActionBar;
+import androidx.appcompat.widget.Toolbar;
 
-import com.google.android.material.switchmaterial.SwitchMaterial;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+import com.google.android.material.switchmaterial.SwitchMaterial;
 
-import java.io.DataOutputStream;
-import java.io.IOException;
-import java.io.OutputStream;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.regex.Pattern;
 
 import rikka.shizuku.Shizuku;
 
 public class MainActivity extends AppCompatActivity {
 
-    private SettingsValueChangeContentObserver mContentOb;
-    List<AccessibilityServiceInfo> l, tmp;
-    ListView listView;
-    SharedPreferences sp;
-    String settingValue, tmpSettingValue, daemon, top;
-    PackageManager pm;
-    boolean perm = false;
-    private boolean listenerAdded = false;
-    private static final String TAG = "MainActivity";
-
-    //自定义一个内容监视器
-    class SettingsValueChangeContentObserver extends ContentObserver {
-        public SettingsValueChangeContentObserver() {
-            super(new Handler());
-        }
-
-        @Override
-        public void onChange(boolean selfChange) {
-            super.onChange(selfChange);
-            //更新settingValue，并与APP内的tmpsettingValue作比对。如果不同，则说明本次设置项改变来自APP外部，于是刷新一下主界面的列表。相同则说明这次改变就是本APP改的，无需处理。
-            settingValue = Settings.Secure.getString(getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
-            if (settingValue == null) settingValue = "";
-            if (!settingValue.equals(tmpSettingValue))
-                runOnUiThread(() -> {
-                    int firstPosition = listView.getFirstVisiblePosition();
-                    int lastPosition = listView.getLastVisiblePosition();
-                    for (int i = firstPosition; i <= lastPosition; i++) {
-                        View view = listView.getChildAt(i - firstPosition);
-                        String[] packageName = Pattern.compile("/").split(tmp.get(i).getId());
-                        boolean isChecked = settingValue.contains(packageName[0] + "/" + packageName[1]) || settingValue.contains(packageName[0] + "/" + packageName[0] + packageName[1]);
-                        (view.findViewById(R.id.ib)).setVisibility(isChecked ? View.VISIBLE : View.INVISIBLE);
-                        ((Switch) view.findViewById(R.id.s)).setChecked(isChecked);
-                    }
-                });
-        }
-    }
+    private List<AccessibilityServiceInfo> serviceList;
+    private SharedPreferences sp;
+    private String daemonListStr;
+    private ServiceAdapter adapter;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private ContentObserver settingsObserver;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-
         setContentView(R.layout.activity_main);
 
         Toolbar toolbar = findViewById(R.id.toolbar);
         setSupportActionBar(toolbar);
-        ActionBar actionBar = getSupportActionBar();
-        if (actionBar != null) {
-            actionBar.setTitle("无障碍管理器");
-        }
+        if (getSupportActionBar() != null) getSupportActionBar().setTitle("无障碍管理器");
 
-        //设置导航栏透明，UI会好看些
+        // 【修复】还原UI沉浸式设置（去除紫边）
         Window window = getWindow();
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             window.setNavigationBarContrastEnforced(false);
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             window.setStatusBarColor(Color.TRANSPARENT);
             window.setNavigationBarColor(Color.TRANSPARENT);
+            // 确保布局延伸到状态栏下方
+            window.getDecorView().setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
+                            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
+                            View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
         }
 
-        //注册shizuku授权结果监听器
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && checkPermission()) {
-            listenerAdded = true;
-            Shizuku.addRequestPermissionResultListener(RL);
-        }
-
-
-        pm = getPackageManager();
-        //注册设置项改变的监听器，用于实时更新APP内显示的各个无障碍服务的状态
-        mContentOb = new SettingsValueChangeContentObserver();
-        getContentResolver().registerContentObserver(Settings.Secure.getUriFor(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES), true, mContentOb);
-
-        //获取本机安装的无障碍服务列表，包括开启的和未开启的都有
-        l = ((AccessibilityManager) getSystemService(Context.ACCESSIBILITY_SERVICE)).getInstalledAccessibilityServiceList();
         sp = getSharedPreferences("data", 0);
+        daemonListStr = sp.getString("daemon", "");
 
-        //读取用户设置“是否隐藏后台”，并进行隐藏后台
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP)
-            ((ActivityManager) getSystemService(Service.ACTIVITY_SERVICE)).getAppTasks().get(0).setExcludeFromRecents(sp.getBoolean("hide", true));
+        ListView listView = findViewById(R.id.list);
+        AccessibilityManager am = (AccessibilityManager) getSystemService(Context.ACCESSIBILITY_SERVICE);
 
-        daemon = sp.getString("daemon", "");
-        top = sp.getString("top", "");
-        Sort();
+        // 创建可变列表防止崩溃
+        serviceList = new ArrayList<>(am.getInstalledAccessibilityServiceList());
 
+        Collections.sort(serviceList, (o1, o2) -> {
+            boolean b1 = daemonListStr.contains(o1.getId());
+            boolean b2 = daemonListStr.contains(o2.getId());
+            return Boolean.compare(b2, b1);
+        });
 
-        listView = findViewById(R.id.list);
+        adapter = new ServiceAdapter();
+        listView.setAdapter(adapter);
 
+        settingsObserver = new ContentObserver(mainHandler) {
+            @Override
+            public void onChange(boolean selfChange) {
+                adapter.notifyDataSetChanged();
+            }
+        };
+        getContentResolver().registerContentObserver(
+                Settings.Secure.getUriFor(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES),
+                true, settingsObserver);
 
-        //获得当前开启的无障碍服务列表
-        settingValue = Settings.Secure.getString(getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
-        if (settingValue == null) settingValue = "";
-        tmpSettingValue = settingValue;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            Shizuku.addRequestPermissionResultListener((requestCode, grantResult) -> {
+                if (grantResult == PackageManager.PERMISSION_GRANTED) {
+                    PermissionUtils.runShizukuCommand(this);
+                }
+            });
+        }
 
+        checkFirstRun();
+        startDaemonService();
+    }
 
-        //初次使用触发
-
-
+    private void checkFirstRun() {
         if (sp.getBoolean("first", true)) {
             new MaterialAlertDialogBuilder(this)
-                    .setTitle("隐私政策")
-                    .setMessage("本应用不会收集或记录您的任何信息，也不包含任何联网功能。继续使用则代表您同意上述隐私政策。")
-                    .setPositiveButton("OK", null).create().show();
-            sp.edit().putBoolean("first", false).apply();
-        }
-
-
-        //如果设备一次都没打开过无障碍设置界面，则下面这个设置项值不存在，同时本APP是无法获取到无障碍设置列表的。所以要在这里加个判断，如果从来没开启过，则需要本APP来给这个设置项写入1来开启。
-        if (Settings.Secure.getString(getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED) != null) {
-            runOnUiThread(() -> listView.setAdapter(new adapter(tmp)));
-            for (int i = 0; i < l.size(); i++) {
-                AccessibilityServiceInfo info = l.get(i);
-                if (daemon.contains(info.getId())) {
-                    StartForeGroundDaemon();
-                }
-            }
-
-        } else {
-            new MaterialAlertDialogBuilder(this).setMessage("您的设备尚未启用无障碍服务功能。您可以选择在系统设置-无障碍-打开或关闭任意服务项来激活系统的无障碍服务功能，也可以授权本APP安全设置写入权限以解决.")
-                    .setNegativeButton("root激活", (dialogInterface, i) -> {
-                        Process p;
+                    .setTitle("提示")
+                    .setMessage("为保证保活效果，建议在系统设置中开启本APP的【保活组件】（一个空的无障碍服务）。")
+                    .setPositiveButton("去开启", (d, i) -> {
                         try {
-                            p = Runtime.getRuntime().exec("su");
-                            DataOutputStream o = new DataOutputStream(p.getOutputStream());
-                            o.writeBytes("pm grant " + getPackageName() + " android.permission.WRITE_SECURE_SETTINGS\nexit\n");
-                            o.flush();
-                            o.close();
-                            p.waitFor();
-                            if (p.exitValue() == 0) {
-                                Toast.makeText(MainActivity.this, "成功激活", Toast.LENGTH_SHORT).show();
-                            }
-                        } catch (IOException | InterruptedException ignored) {
-                            Toast.makeText(MainActivity.this, "激活失败", Toast.LENGTH_SHORT).show();
+                            startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+                        } catch (Exception ignored) {
                         }
                     })
-                    .setPositiveButton("复制命令", (dialogInterface, i) -> {
-                        ((ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("c", "adb shell pm grant " + getPackageName() + " android.permission.WRITE_SECURE_SETTINGS"));
-                        Toast.makeText(MainActivity.this, "命令已复制到剪切板", Toast.LENGTH_SHORT).show();
-                    })
-                    .setNeutralButton("Shizuku激活", (dialogInterface, i) -> {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) check();
-                    })
-                    .create().show();
-            try {
-                Settings.Secure.putString(getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED, "1");
-            } catch (Exception ignored) {
-            }
+                    .setNegativeButton("知道了", null)
+                    .show();
+            sp.edit().putBoolean("first", false).apply();
         }
     }
 
-    private void Sort() {
-        tmp = new ArrayList<>(l);
-        Collections.sort(tmp, (info1, info2) -> {
-            String id = info1.getId();
-            String id2 = info2.getId();
+    private void startDaemonService() {
+        if (!PermissionUtils.hasSecureSettingsPermission(this)) return;
 
-            // 获取 id 和 id2 在 top 中的索引位置
-            int index1 = top.indexOf(id);
-            int index2 = top.indexOf(id2);
-
-            if (index1 != -1 && index2 != -1) {
-                // 如果都在 top 中，按出现顺序排列
-                return Integer.compare(index1, index2);
-            } else if (index1 != -1) {
-                // 如果只有 id 在 top 中，排在前面
-                return -1;
-            } else if (index2 != -1) {
-                // 如果只有 id2 在 top 中，排在前面
-                return 1;
-            }
-            // 如果都不在 top 中，保持它们的相对顺序
-            return 0;
-        });
-    }
-
-    private final Shizuku.OnRequestPermissionResultListener RL = (requestCode, grantResult) -> check();
-
-    //检查Shizuku权限，申请Shizuku权限的函数
-    private void check() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
-        if (checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED)
-            return;
-        boolean b = true, c = false;
-        try {
-            if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED)
-                Shizuku.requestPermission(0);
-            else c = true;
-        } catch (Exception e) {
-            if (checkSelfPermission("moe.shizuku.manager.permission.API_V23") == PackageManager.PERMISSION_GRANTED)
-                c = true;
-            if (e.getClass() == IllegalStateException.class) {
-                b = false;
-                Toast.makeText(this, "shizuku未运行", Toast.LENGTH_SHORT).show();
-            }
-
-        }
-        if (b && c) {
-            try {
-                Process p = Shizuku.newProcess(new String[]{"sh"}, null, null);
-                OutputStream out = p.getOutputStream();
-                out.write(("pm grant " + getPackageName() + " android.permission.WRITE_SECURE_SETTINGS\nexit\n").getBytes());
-                out.flush();
-                out.close();
-                p.waitFor();
-                if (p.exitValue() == 0) {
-                    Toast.makeText(this, "成功激活", Toast.LENGTH_SHORT).show();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+            if (!pm.isIgnoringBatteryOptimizations(getPackageName())) {
+                try {
+                    Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                    intent.setData(Uri.parse("package:" + getPackageName()));
+                    startActivity(intent);
+                } catch (Exception ignored) {
                 }
-            } catch (IOException | InterruptedException ioException) {
-                Toast.makeText(this, "激活失败", Toast.LENGTH_SHORT).show();
             }
         }
 
+        Intent intent = new Intent(this, DaemonService.class);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent);
+        } else {
+            startService(intent);
+        }
     }
 
-
-    //一些收尾工作，取消注册监听器什么的
     @Override
     protected void onDestroy() {
-        if (listenerAdded) Shizuku.removeRequestPermissionResultListener(RL);
-
-        getContentResolver().unregisterContentObserver(mContentOb);
         super.onDestroy();
+        getContentResolver().unregisterContentObserver(settingsObserver);
     }
-
-
-    @Override // android.app.Activity
-    public boolean onPrepareOptionsMenu(Menu menu) {
-        menu.findItem(R.id.boot).setChecked(sp.getBoolean("boot", true));
-        menu.findItem(R.id.toast).setChecked(sp.getBoolean("toast", true));
-        menu.findItem(R.id.hide).setChecked(sp.getBoolean("hide", true));
-        return super.onPrepareOptionsMenu(menu);
-    }
-
 
     @Override
     public boolean onCreateOptionsMenu(Menu menu) {
         getMenuInflater().inflate(R.menu.arrange, menu);
-        return super.onCreateOptionsMenu(menu);
+        return true;
+    }
+
+    @Override
+    public boolean onPrepareOptionsMenu(Menu menu) {
+        menu.findItem(R.id.boot).setChecked(sp.getBoolean("boot", true));
+        menu.findItem(R.id.toast).setChecked(sp.getBoolean("toast", true));
+        return super.onPrepareOptionsMenu(menu);
     }
 
     @Override
     public boolean onOptionsItemSelected(MenuItem item) {
-        // 这个方法只传递一个 MenuItem 对象，更简洁
-        int itemId = item.getItemId();
-
-        // 你的所有 if/else if 逻辑完全保持不变，
-        // 只是把变量名从 menuItem 改为 item
-        if (itemId == R.id.boot) {
-            sp.edit().putBoolean("boot", !item.isChecked()).apply();
-            item.setChecked(!item.isChecked());
-        } else if (itemId == R.id.toast) {
-            sp.edit().putBoolean("toast", !item.isChecked()).apply();
-            item.setChecked(!item.isChecked());
-        } else if (itemId == R.id.hide) {
-            sp.edit().putBoolean("hide", !item.isChecked()).apply();
-            item.setChecked(!item.isChecked());
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                ((ActivityManager) getSystemService(Service.ACTIVITY_SERVICE)).getAppTasks().get(0).setExcludeFromRecents(sp.getBoolean("hide", true));
-            }
+        int id = item.getItemId();
+        if (id == R.id.boot || id == R.id.toast) {
+            boolean newState = !item.isChecked();
+            sp.edit().putBoolean(id == R.id.boot ? "boot" : "toast", newState).apply();
+            item.setChecked(newState);
+            return true;
         }
-
-        // 最后，调用 super 的同名方法
         return super.onOptionsItemSelected(item);
     }
 
-    //这个是用于适配列表中的每一项设置项的显示
-    public class adapter extends BaseAdapter {
-        private final List<AccessibilityServiceInfo> list;
+    class ServiceAdapter extends BaseAdapter {
 
-
-        public adapter(List<AccessibilityServiceInfo> list) {
-            super();
-            this.list = list;
-        }
-
+        @Override
         public int getCount() {
-            return list.size();
+            return serviceList.size();
         }
 
         @Override
         public Object getItem(int position) {
-            return null;
+            return serviceList.get(position);
         }
 
         @Override
@@ -348,279 +202,80 @@ public class MainActivity extends AppCompatActivity {
             return position;
         }
 
-        @SuppressLint({"ViewHolder", "InflateParams"})
+        @SuppressLint("ViewHolder")
+        @Override
         public View getView(int position, View convertView, ViewGroup parent) {
-            ViewHolder holder;
             if (convertView == null) {
-                convertView = LayoutInflater.from(MainActivity.this).inflate(R.layout.item, null);
-                holder = new ViewHolder();
-                holder.texta = convertView.findViewById(R.id.a);
-                holder.textb = convertView.findViewById(R.id.b);
-                holder.imageView = convertView.findViewById(R.id.c);
-                holder.sw = convertView.findViewById(R.id.s);
-                holder.ib = convertView.findViewById(R.id.ib);
-                convertView.setTag(holder);
-            } else {
-                holder = (ViewHolder) convertView.getTag();
+                convertView = LayoutInflater.from(MainActivity.this).inflate(R.layout.item, parent, false);
             }
-            AccessibilityServiceInfo info = list.get(position);
-            String serviceName = info.getId();
-            String[] packageName = Pattern.compile("/").split(serviceName);
-            Drawable icon = null;
-            String Packagelabel = null;
-            String ServiceLabel = null;
-            String Description = null;
+
+            AccessibilityServiceInfo info = serviceList.get(position);
+            String id = info.getId();
+            ComponentName cn = ComponentName.unflattenFromString(id);
+            PackageManager pm = getPackageManager();
+
+            TextView nameTv = convertView.findViewById(R.id.b);
+            TextView descTv = convertView.findViewById(R.id.a);
+            ImageView iconIv = convertView.findViewById(R.id.c);
+            SwitchMaterial sw = convertView.findViewById(R.id.s);
+            ImageButton lockBtn = convertView.findViewById(R.id.ib);
+
+            String label = id;
             try {
-                icon = pm.getApplicationIcon(packageName[0]);
-                Packagelabel = String.valueOf(pm.getApplicationLabel(pm.getApplicationInfo(packageName[0], PackageManager.GET_META_DATA)));
-                ServiceLabel = pm.getServiceInfo(new ComponentName(packageName[0], packageName[0] + packageName[1]), PackageManager.MATCH_DEFAULT_ONLY).loadLabel(pm).toString();
-                Description = info.loadDescription(pm);
-            } catch (PackageManager.NameNotFoundException ignored) {
+                if (cn != null) {
+                    label = pm.getApplicationLabel(pm.getApplicationInfo(cn.getPackageName(), 0)).toString();
+                    iconIv.setImageDrawable(pm.getApplicationIcon(cn.getPackageName()));
+                }
+            } catch (Exception e) {
+                iconIv.setImageResource(android.R.drawable.sym_def_app_icon);
             }
-            if (ServiceLabel == null) ServiceLabel = Packagelabel;
-            holder.imageView.setImageDrawable(icon);
-            holder.textb.setText(Packagelabel.equals(ServiceLabel) ? ServiceLabel : String.format("%s/%s", Packagelabel, ServiceLabel));
-            holder.texta.setText(Description == null || Description.isEmpty() ? "该服务没有描述" : Description);
+            nameTv.setText(label);
+            descTv.setText(info.loadDescription(pm));
 
+            boolean isEnabled = AccessibilityUtils.isServiceEnabled(MainActivity.this, id);
+            boolean isDaemon = daemonListStr.contains(id);
 
-            holder.ib.setImageResource(daemon.contains(serviceName) ? R.drawable.lock1 : R.drawable.lock);
-//            holder.sw.setEnabled(!daemon.contains(serviceName));
-            holder.ib.setOnClickListener(view -> {
-                if (checkPermission()) {
-                    createPermissionDialog();
+            sw.setOnCheckedChangeListener(null);
+            sw.setChecked(isEnabled);
+            lockBtn.setVisibility(isEnabled ? View.VISIBLE : View.INVISIBLE);
+            lockBtn.setImageResource(isDaemon ? R.drawable.lock1 : R.drawable.lock);
+
+            sw.setOnClickListener(v -> {
+                if (!PermissionUtils.hasSecureSettingsPermission(MainActivity.this)) {
+                    sw.setChecked(!sw.isChecked());
+                    PermissionUtils.showPermissionDialog(MainActivity.this);
                     return;
                 }
-                daemon = daemon.contains(serviceName) ? daemon.replace(serviceName + ":", "") : serviceName + ":" + daemon;
-                sp.edit().putString("daemon", daemon).apply();
-                holder.ib.setImageResource(daemon.contains(serviceName) ? R.drawable.lock1 : R.drawable.lock);
-//                    holder.sw.setEnabled(!daemon.contains(serviceName));
-                StartForeGroundDaemon();
-            });
-            holder.sw.setChecked(settingValue.contains(packageName[0] + "/" + packageName[1]) || settingValue.contains(packageName[0] + "/" + packageName[0] + packageName[1]));
-            holder.ib.setVisibility(holder.sw.isChecked() ? View.VISIBLE : View.INVISIBLE);
-            holder.sw.setOnClickListener(view -> {
-                if (checkPermission()) {
-                    createPermissionDialog();
-                    holder.sw.setChecked(!holder.sw.isChecked());
+
+                if (sw.isChecked()) {
+                    AccessibilityUtils.enableService(MainActivity.this, id);
                 } else {
-
-                    String s = Settings.Secure.getString(getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
-                    if (s == null) s = "";
-
-                    if (holder.sw.isChecked()) {
-                        tmpSettingValue = serviceName + ":" + s;
-                        top = serviceName + ":" + top; // 插入到最前面
-                        sp.edit().putString("top", top).apply();
-                        Sort();
-                    } else if (daemon.contains(serviceName) && !holder.sw.isChecked()) {
-                        holder.sw.setChecked(true);
-                        sp.edit().putString("top", top).apply();
-                        Sort();
-                    } else {
-                        // 先从 top 中移除 serviceName，再将其追加到末尾
-                        tmpSettingValue = s.replace(serviceName + ":", "")
-                                .replace(packageName[0] + "/" + packageName[0] + packageName[1] + ":", "")
-                                .replace(serviceName, "")
-                                .replace(packageName[0] + "/" + packageName[0] + packageName[1], "");
-
-                        top = top.replace(serviceName + ":", ""); // 移除 serviceName
-                        top = top + ":" + serviceName; //插入到末尾
-                        sp.edit().putString("top", top).apply();
-                        Sort();
+                    if (isDaemon) {
+                        updateDaemonList(id, false);
+                        lockBtn.setImageResource(R.drawable.lock);
                     }
-                    Settings.Secure.putString(getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, tmpSettingValue);
-                    holder.ib.setVisibility(holder.sw.isChecked() ? View.VISIBLE : View.INVISIBLE);
+                    AccessibilityUtils.disableService(MainActivity.this, id);
                 }
             });
 
-
-            //点击某个项目的空白处将展示该服务的详细信息，下面的代码是解析各类FLAG的，挺麻烦，不过没别的方法。
-            convertView.setOnClickListener(view -> {
-                MaterialAlertDialogBuilder builder = new MaterialAlertDialogBuilder(MainActivity.this);
-                int fb = info.feedbackType;
-                String feedback = "";
-                if ((fb & 32) != 0) feedback += "盲文反馈\n";
-                if ((fb & 16) != 0) feedback += "通用反馈\n";
-                if ((fb & 8) != 0) feedback += "视觉反馈\n";
-                if ((fb & 4) != 0) feedback += "可听（未说出）反馈\n";
-                if ((fb & 2) != 0) feedback += "触觉反馈\n";
-                if ((fb & 1) != 0) feedback += "口头反馈\n";
-                if (feedback.isEmpty()) feedback = "无\n";
-
-
-                int cap = info.getCapabilities();
-                String capa = "";
-                if ((cap & 32) != 0) capa += "执行手势\n";
-                if ((cap & 16) != 0) capa += "控制显示器放大率\n";
-                if ((cap & 8) != 0) capa += "监听和拦截按键事件\n";
-                if ((cap & 4) != 0)
-                    capa += "请求增强的Web辅助功能增强功能。 例如，安装脚本以使网页内容更易于访问\n";
-                if ((cap & 2) != 0) capa += "请求触摸探索模式，使触屏操作变成鼠标操作\n";
-                if ((cap & 1) != 0) capa += "读取屏幕内容\n";
-                if (capa.isEmpty()) capa = "无\n";
-
-                int eve = info.eventTypes;
-                String event = "";
-                if ((eve & 33554432) != 0) event += "当前正在阅读用户屏幕上下文的助理事件\n";
-                if ((eve & 16777216) != 0) event += "点击控件上下文的事件\n";
-                if ((eve & 8388608) != 0) event += "窗口更改的事件\n";
-                if ((eve & 4194304) != 0) event += "用户结束触摸屏幕的事件\n";
-                if ((eve & 2097152) != 0) event += "用户开始触摸屏幕的事件\n";
-                if ((eve & 1048576) != 0) event += "结束手势检测的事件\n";
-                if ((eve & 524288) != 0) event += "开始手势检测事件\n";
-                if ((eve & 262144) != 0) event += "遍历视图文本事件\n";
-                if ((eve & 131072) != 0) event += "清除可访问性焦点事件\n";
-                if ((eve & 65536) != 0) event += "获得可访问性焦点的事件\n";
-                if ((eve & 32768) != 0) event += "发布公告的应用程序的事件\n";
-                if ((eve & 16384) != 0) event += "更改选中文本的事件\n";
-                if ((eve & 8192) != 0) event += "滚动视图的事件\n";
-                if ((eve & 4096) != 0) event += "窗口内容更改的事件\n";
-                if ((eve & 2048) != 0) event += "结束触摸探索手势的事件\n";
-                if ((eve & 1024) != 0) event += "开始触摸探索手势的事件\n";
-                if ((eve & 512) != 0) event += "控件结束文字输入事件\n";
-                if ((eve & 256) != 0) event += "控件接受文字输入事件\n";
-                if ((eve & 128) != 0) event += "通知状态改变的事件\n";
-                if ((eve & 64) != 0) event += "窗口状态更改的事件\n";
-                if ((eve & 32) != 0) event += "文本框的文字改变事件\n";
-                if ((eve & 16) != 0) event += "控件获得焦点的事件\n";
-                if ((eve & 8) != 0) event += "控件被选取的事件\n";
-                if ((eve & 4) != 0) event += "长按控件的事件\n";
-                if ((eve & 2) != 0) event += "点击控件的事件\n";
-                if (event.isEmpty()) event = "无\n";
-
-
-                String range = info.packageNames == null ? "全局生效" : Arrays.toString(info.packageNames).replace("[", "").replace("]", "").replace(", ", "\n").replace(",", "\n");
-
-                int fg = info.flags;
-                String flag = "";
-                if ((fg & 64) != 0) flag += "访问所有交互式窗口的内容\n";
-                if ((fg & 32) != 0) flag += "监听和拦截按键事件\n";
-                if ((fg & 16) != 0) flag += "获取屏幕视图上所有控件的ID\n";
-                if ((fg & 8) != 0) flag += "启用Web可访问性增强扩展\n";
-                if ((fg & 4) != 0) flag += "要求系统进入触摸探索模式\n";
-                if ((fg & 2) != 0) flag += "查询窗口中的不重要内容\n";
-                if ((fg & 1) != 0) flag += "默认\n";
-                if (flag.isEmpty()) flag = "无\n";
-
-
-                try {
-                    final ScrollView scrollView = new ScrollView(MainActivity.this);
-                    final TextView textView = new TextView(MainActivity.this);
-                    textView.setTextIsSelectable(true);
-                    textView.setPadding(40, 20, 40, 20);
-                    textView.setTextSize(18f);
-                    textView.setAlpha(0.8f);
-                    textView.setTextColor(Color.BLACK);
-                    textView.setText(String.format("服务类名：\n%s\n\n特殊能力：\n%s\n生效范围：\n%s\n\n反馈方式：\n%s\n捕获事件类型：\n%s\n特殊标志：\n%s", serviceName, capa, range, feedback, event, flag));
-                    scrollView.addView(textView);
-                    if (info.getSettingsActivityName() != null && !info.getSettingsActivityName().isEmpty())
-                        builder.setNegativeButton("设置", (dialogInterface, i) -> {
-                            try {
-                                startActivity(new Intent().setComponent(new ComponentName(packageName[0], info.getSettingsActivityName())));
-                            } catch (Exception ignored) {
-                            }
-                        });
-
-                    builder
-                            .setIcon(pm.getApplicationIcon(packageName[0]))
-                            .setView(scrollView).setTitle("服务详细信息")
-                            .setPositiveButton("知道了", null)
-                            .create().show();
-                } catch (Exception ignored) {
-                }
+            lockBtn.setOnClickListener(v -> {
+                boolean newStatus = !daemonListStr.contains(id);
+                updateDaemonList(id, newStatus);
+                lockBtn.setImageResource(newStatus ? R.drawable.lock1 : R.drawable.lock);
+                if (newStatus) startDaemonService();
             });
+
             return convertView;
         }
 
-        private void createPermissionDialog() {
-            String cmd = "pm grant " + getPackageName() + " android.permission.WRITE_SECURE_SETTINGS";
-            new MaterialAlertDialogBuilder(MainActivity.this)
-                    .setMessage("安卓5.1和更低版本的设备，需将本APP转换为系统应用。\n\n安卓6.0及更高版本的设备，在下面三个方法中任选一个均可：\n1.连接电脑USB调试后在电脑CMD执行以下命令：\nadb shell " + cmd + "\n\n2.root激活。\n\n3.Shizuku激活。")
-                    .setTitle("需要安全设置写入权限")
-                    .setPositiveButton("复制命令", (dialogInterface, i) -> {
-                        ((ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("c", "adb shell " + cmd));
-                        Toast.makeText(MainActivity.this, "命令已复制到剪切板", Toast.LENGTH_SHORT).show();
-                    })
-                    .setNegativeButton("root激活", (dialoginterface, i) -> {
-                        Process p;
-                        try {
-                            p = Runtime.getRuntime().exec("su");
-                            DataOutputStream o = new DataOutputStream(p.getOutputStream());
-                            o.writeBytes(cmd + "\nexit\n");
-                            o.flush();
-                            o.close();
-                            p.waitFor();
-                            if (p.exitValue() == 0) {
-                                Toast.makeText(MainActivity.this, "成功激活", Toast.LENGTH_SHORT).show();
-                            }
-                        } catch (IOException | InterruptedException ignored) {
-                            Toast.makeText(MainActivity.this, "激活失败", Toast.LENGTH_SHORT).show();
-                        }
-                    })
-                    .setNeutralButton("Shizuku激活", (dialogInterface, i) -> {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) check();
-                    })
-                    .create().show();
-        }
-
-        class ViewHolder {
-
-            TextView texta;
-            TextView textb;
-            ImageView imageView;
-            SwitchMaterial sw;
-            ImageButton ib;
-        }
-
-
-    }
-
-    //查看APP是否可以写入安全设置
-    boolean checkPermission() {
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
-            perm = checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED;
-        else {
-            try {
-                // 1. 获取 PackageInfo
-                PackageInfo packageInfo = getPackageManager().getPackageInfo(getPackageName(), PackageManager.GET_CONFIGURATIONS);
-
-                // 2.【关键】只在成功获取到 packageInfo 之后，才使用它
-                //    同时检查 applicationInfo 是否为 null，做到万无一失
-                if (packageInfo != null && packageInfo.applicationInfo != null) {
-                    perm = (packageInfo.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0;
-                } else {
-                    // 如果获取失败或 applicationInfo 为空，则认为没有权限
-                    perm = false;
-                }
-            } catch (PackageManager.NameNotFoundException e) {
-                perm = false;
-                Log.e(TAG, "Could not find PackageInfo for our own package.", e);
+        private void updateDaemonList(String id, boolean add) {
+            if (add) {
+                if (!daemonListStr.contains(id)) daemonListStr += id + ":";
+            } else {
+                daemonListStr = daemonListStr.replace(id + ":", "");
             }
+            sp.edit().putString("daemon", daemonListStr).apply();
+            notifyDataSetChanged();
         }
-        return !perm;
     }
-
-    //启动前台服务，进行保活!
-    void StartForeGroundDaemon() {
-
-        if (checkPermission()) return;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !((NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE)).areNotificationsEnabled()) {
-            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 0);
-            Toast.makeText(this, "请授予通知权限", Toast.LENGTH_SHORT).show();
-            return;
-        }
-
-        //申请取消电池优化
-        if (Build.VERSION.SDK_INT >= 23 && !((PowerManager) getSystemService(Service.POWER_SERVICE)).isIgnoringBatteryOptimizations(getPackageName()))
-            startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + getPackageName())));
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-            startForegroundService(new Intent(this, daemonService.class));
-        else
-            startService(new Intent(this, daemonService.class));
-
-    }
-
-
 }
