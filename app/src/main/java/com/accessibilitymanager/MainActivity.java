@@ -2,6 +2,7 @@ package com.accessibilitymanager;
 
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.annotation.SuppressLint;
+import android.app.ActivityManager; // 导入 ActivityManager
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -16,12 +17,13 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.provider.Settings;
+import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.Window; // 导入 Window
+import android.view.Window;
 import android.view.accessibility.AccessibilityManager;
 import android.widget.BaseAdapter;
 import android.widget.ImageButton;
@@ -29,10 +31,10 @@ import android.widget.ImageView;
 import android.widget.ListView;
 import android.widget.TextView;
 
+import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.widget.Toolbar;
 
-import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.switchmaterial.SwitchMaterial;
 
 import java.util.ArrayList;
@@ -41,7 +43,15 @@ import java.util.List;
 
 import rikka.shizuku.Shizuku;
 
+/**
+ * 主界面 Activity
+ * <p>
+ * 负责展示系统中的无障碍服务列表，提供开关控制与保活锁定功能。
+ * 实现了权限的按需申请与保活服务的静默开启。
+ */
 public class MainActivity extends AppCompatActivity {
+
+    private static final String TAG = "MainActivity";
 
     private List<AccessibilityServiceInfo> serviceList;
     private SharedPreferences sp;
@@ -55,11 +65,38 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
+        initToolbar();
+        initImmersiveStatusBar();
+
+        sp = getSharedPreferences(AppConstants.PREFS_NAME, Context.MODE_PRIVATE);
+        daemonListStr = sp.getString(AppConstants.KEY_DAEMON_LIST, "");
+
+        // 初始化“隐藏后台”状态
+        boolean hideRecents = sp.getBoolean(AppConstants.KEY_HIDE_RECENTS, false);
+        if (hideRecents) {
+            applyHideFromRecents(true);
+        }
+
+        initListView();
+        initSettingsObserver();
+        initShizukuListener();
+
+        // 尝试启动守护服务 (如果有权限)
+        startDaemonService();
+    }
+
+    private void initToolbar() {
         Toolbar toolbar = findViewById(R.id.toolbar);
         setSupportActionBar(toolbar);
-        if (getSupportActionBar() != null) getSupportActionBar().setTitle("无障碍管理器");
+        if (getSupportActionBar() != null) {
+            getSupportActionBar().setTitle("无障碍管理器");
+        }
+    }
 
-        // 【修复】还原UI沉浸式设置（去除紫边）
+    /**
+     * 配置沉浸式状态栏和导航栏
+     */
+    private void initImmersiveStatusBar() {
         Window window = getWindow();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             window.setNavigationBarContrastEnforced(false);
@@ -67,21 +104,23 @@ public class MainActivity extends AppCompatActivity {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             window.setStatusBarColor(Color.TRANSPARENT);
             window.setNavigationBarColor(Color.TRANSPARENT);
-            // 确保布局延伸到状态栏下方
+            // 确保布局延伸到状态栏和导航栏下方
             window.getDecorView().setSystemUiVisibility(
                     View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
                             View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
                             View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
         }
+    }
 
-        sp = getSharedPreferences("data", 0);
-        daemonListStr = sp.getString("daemon", "");
-
+    private void initListView() {
         ListView listView = findViewById(R.id.list);
         AccessibilityManager am = (AccessibilityManager) getSystemService(Context.ACCESSIBILITY_SERVICE);
 
-        // 创建可变列表防止崩溃
-        serviceList = new ArrayList<>(am.getInstalledAccessibilityServiceList());
+        if (am != null) {
+            serviceList = new ArrayList<>(am.getInstalledAccessibilityServiceList());
+        } else {
+            serviceList = new ArrayList<>();
+        }
 
         Collections.sort(serviceList, (o1, o2) -> {
             boolean b1 = daemonListStr.contains(o1.getId());
@@ -91,17 +130,23 @@ public class MainActivity extends AppCompatActivity {
 
         adapter = new ServiceAdapter();
         listView.setAdapter(adapter);
+    }
 
+    private void initSettingsObserver() {
         settingsObserver = new ContentObserver(mainHandler) {
             @Override
             public void onChange(boolean selfChange) {
-                adapter.notifyDataSetChanged();
+                if (adapter != null) {
+                    adapter.notifyDataSetChanged();
+                }
             }
         };
         getContentResolver().registerContentObserver(
                 Settings.Secure.getUriFor(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES),
                 true, settingsObserver);
+    }
 
+    private void initShizukuListener() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             Shizuku.addRequestPermissionResultListener((requestCode, grantResult) -> {
                 if (grantResult == PackageManager.PERMISSION_GRANTED) {
@@ -109,25 +154,11 @@ public class MainActivity extends AppCompatActivity {
                 }
             });
         }
-
-        checkFirstRun();
-        startDaemonService();
     }
 
-    private void checkFirstRun() {
-        if (sp.getBoolean("first", true)) {
-            new MaterialAlertDialogBuilder(this)
-                    .setTitle("提示")
-                    .setMessage("为保证保活效果，建议在系统设置中开启本APP的【保活组件】（一个空的无障碍服务）。")
-                    .setPositiveButton("去开启", (d, i) -> {
-                        try {
-                            startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
-                        } catch (Exception ignored) {
-                        }
-                    })
-                    .setNegativeButton("知道了", null)
-                    .show();
-            sp.edit().putBoolean("first", false).apply();
+    private void ensureKeepAliveService() {
+        if (PermissionUtils.hasSecureSettingsPermission(this)) {
+            AccessibilityUtils.tryEnableKeepAliveService(this);
         }
     }
 
@@ -136,12 +167,13 @@ public class MainActivity extends AppCompatActivity {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
-            if (!pm.isIgnoringBatteryOptimizations(getPackageName())) {
+            if (pm != null && !pm.isIgnoringBatteryOptimizations(getPackageName())) {
                 try {
                     Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
                     intent.setData(Uri.parse("package:" + getPackageName()));
                     startActivity(intent);
-                } catch (Exception ignored) {
+                } catch (Exception e) {
+                    Log.e(TAG, "Failed to request battery optimization ignore", e);
                 }
             }
         }
@@ -154,10 +186,31 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    /**
+     * 设置应用是否从最近任务列表中隐藏
+     */
+    private void applyHideFromRecents(boolean hide) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            try {
+                ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+                if (am != null) {
+                    List<ActivityManager.AppTask> tasks = am.getAppTasks();
+                    if (tasks != null && !tasks.isEmpty()) {
+                        tasks.get(0).setExcludeFromRecents(hide);
+                    }
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to change recents visibility", e);
+            }
+        }
+    }
+
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        getContentResolver().unregisterContentObserver(settingsObserver);
+        if (settingsObserver != null) {
+            getContentResolver().unregisterContentObserver(settingsObserver);
+        }
     }
 
     @Override
@@ -168,25 +221,38 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     public boolean onPrepareOptionsMenu(Menu menu) {
-        menu.findItem(R.id.boot).setChecked(sp.getBoolean("boot", true));
-        menu.findItem(R.id.toast).setChecked(sp.getBoolean("toast", true));
+        menu.findItem(R.id.boot).setChecked(sp.getBoolean(AppConstants.KEY_AUTO_BOOT, true));
+        menu.findItem(R.id.toast).setChecked(sp.getBoolean(AppConstants.KEY_SHOW_TOAST, true));
+        menu.findItem(R.id.hide).setChecked(sp.getBoolean(AppConstants.KEY_HIDE_RECENTS, false));
         return super.onPrepareOptionsMenu(menu);
     }
 
     @Override
-    public boolean onOptionsItemSelected(MenuItem item) {
+    public boolean onOptionsItemSelected(@NonNull MenuItem item) {
         int id = item.getItemId();
-        if (id == R.id.boot || id == R.id.toast) {
+        if (id == R.id.boot) {
             boolean newState = !item.isChecked();
-            sp.edit().putBoolean(id == R.id.boot ? "boot" : "toast", newState).apply();
+            sp.edit().putBoolean(AppConstants.KEY_AUTO_BOOT, newState).apply();
             item.setChecked(newState);
+            return true;
+        } else if (id == R.id.toast) {
+            boolean newState = !item.isChecked();
+            sp.edit().putBoolean(AppConstants.KEY_SHOW_TOAST, newState).apply();
+            item.setChecked(newState);
+            return true;
+        } else if (id == R.id.hide) {
+            // 处理隐藏后台逻辑
+            boolean newState = !item.isChecked();
+            sp.edit().putBoolean(AppConstants.KEY_HIDE_RECENTS, newState).apply();
+            item.setChecked(newState);
+            applyHideFromRecents(newState);
             return true;
         }
         return super.onOptionsItemSelected(item);
     }
 
     class ServiceAdapter extends BaseAdapter {
-
+        // ... (适配器代码保持不变，与上一版一致) ...
         @Override
         public int getCount() {
             return serviceList.size();
@@ -202,11 +268,21 @@ public class MainActivity extends AppCompatActivity {
             return position;
         }
 
-        @SuppressLint("ViewHolder")
+        @SuppressLint("InflateParams")
         @Override
         public View getView(int position, View convertView, ViewGroup parent) {
+            ViewHolder holder;
             if (convertView == null) {
                 convertView = LayoutInflater.from(MainActivity.this).inflate(R.layout.item, parent, false);
+                holder = new ViewHolder();
+                holder.nameTv = convertView.findViewById(R.id.b);
+                holder.descTv = convertView.findViewById(R.id.a);
+                holder.iconIv = convertView.findViewById(R.id.c);
+                holder.sw = convertView.findViewById(R.id.s);
+                holder.lockBtn = convertView.findViewById(R.id.ib);
+                convertView.setTag(holder);
+            } else {
+                holder = (ViewHolder) convertView.getTag();
             }
 
             AccessibilityServiceInfo info = serviceList.get(position);
@@ -214,57 +290,58 @@ public class MainActivity extends AppCompatActivity {
             ComponentName cn = ComponentName.unflattenFromString(id);
             PackageManager pm = getPackageManager();
 
-            TextView nameTv = convertView.findViewById(R.id.b);
-            TextView descTv = convertView.findViewById(R.id.a);
-            ImageView iconIv = convertView.findViewById(R.id.c);
-            SwitchMaterial sw = convertView.findViewById(R.id.s);
-            ImageButton lockBtn = convertView.findViewById(R.id.ib);
-
             String label = id;
             try {
                 if (cn != null) {
                     label = pm.getApplicationLabel(pm.getApplicationInfo(cn.getPackageName(), 0)).toString();
-                    iconIv.setImageDrawable(pm.getApplicationIcon(cn.getPackageName()));
+                    holder.iconIv.setImageDrawable(pm.getApplicationIcon(cn.getPackageName()));
                 }
-            } catch (Exception e) {
-                iconIv.setImageResource(android.R.drawable.sym_def_app_icon);
+            } catch (PackageManager.NameNotFoundException e) {
+                holder.iconIv.setImageResource(android.R.drawable.sym_def_app_icon);
             }
-            nameTv.setText(label);
-            descTv.setText(info.loadDescription(pm));
+            holder.nameTv.setText(label);
+            holder.descTv.setText(info.loadDescription(pm));
 
             boolean isEnabled = AccessibilityUtils.isServiceEnabled(MainActivity.this, id);
             boolean isDaemon = daemonListStr.contains(id);
 
-            sw.setOnCheckedChangeListener(null);
-            sw.setChecked(isEnabled);
-            lockBtn.setVisibility(isEnabled ? View.VISIBLE : View.INVISIBLE);
-            lockBtn.setImageResource(isDaemon ? R.drawable.lock1 : R.drawable.lock);
+            holder.sw.setOnCheckedChangeListener(null);
+            holder.sw.setChecked(isEnabled);
 
-            sw.setOnClickListener(v -> {
+            holder.lockBtn.setVisibility(isEnabled ? View.VISIBLE : View.INVISIBLE);
+            holder.lockBtn.setImageResource(isDaemon ? R.drawable.lock1 : R.drawable.lock);
+
+            holder.sw.setOnClickListener(v -> {
                 if (!PermissionUtils.hasSecureSettingsPermission(MainActivity.this)) {
-                    sw.setChecked(!sw.isChecked());
+                    holder.sw.setChecked(!holder.sw.isChecked());
                     PermissionUtils.showPermissionDialog(MainActivity.this);
                     return;
                 }
-
-                if (sw.isChecked()) {
+                if (holder.sw.isChecked()) {
                     AccessibilityUtils.enableService(MainActivity.this, id);
+                    ensureKeepAliveService();
                 } else {
                     if (isDaemon) {
                         updateDaemonList(id, false);
-                        lockBtn.setImageResource(R.drawable.lock);
+                        holder.lockBtn.setImageResource(R.drawable.lock);
                     }
                     AccessibilityUtils.disableService(MainActivity.this, id);
                 }
             });
 
-            lockBtn.setOnClickListener(v -> {
+            holder.lockBtn.setOnClickListener(v -> {
+                if (!PermissionUtils.hasSecureSettingsPermission(MainActivity.this)) {
+                    PermissionUtils.showPermissionDialog(MainActivity.this);
+                    return;
+                }
                 boolean newStatus = !daemonListStr.contains(id);
                 updateDaemonList(id, newStatus);
-                lockBtn.setImageResource(newStatus ? R.drawable.lock1 : R.drawable.lock);
-                if (newStatus) startDaemonService();
+                holder.lockBtn.setImageResource(newStatus ? R.drawable.lock1 : R.drawable.lock);
+                if (newStatus) {
+                    startDaemonService();
+                    ensureKeepAliveService();
+                }
             });
-
             return convertView;
         }
 
@@ -274,8 +351,15 @@ public class MainActivity extends AppCompatActivity {
             } else {
                 daemonListStr = daemonListStr.replace(id + ":", "");
             }
-            sp.edit().putString("daemon", daemonListStr).apply();
-            notifyDataSetChanged();
+            sp.edit().putString(AppConstants.KEY_DAEMON_LIST, daemonListStr).apply();
         }
+    }
+
+    static class ViewHolder {
+        TextView nameTv;
+        TextView descTv;
+        ImageView iconIv;
+        SwitchMaterial sw;
+        ImageButton lockBtn;
     }
 }

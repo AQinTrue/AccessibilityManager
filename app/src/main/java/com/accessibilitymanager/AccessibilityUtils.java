@@ -9,6 +9,12 @@ import android.util.Log;
 import java.util.HashSet;
 import java.util.Set;
 
+/**
+ * 无障碍服务工具类
+ * <p>
+ * 负责解析、读取和写入系统设置中的 ENABLED_ACCESSIBILITY_SERVICES 字符串。
+ * 包含开启、关闭指定服务以及静默开启保活组件的逻辑。
+ */
 public class AccessibilityUtils {
     private static final String TAG = "AccessibilityUtils";
     private static final String SETTING_KEY = Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES;
@@ -16,13 +22,18 @@ public class AccessibilityUtils {
 
     /**
      * 获取当前系统已开启的无障碍服务列表
+     *
+     * @param context 上下文
+     * @return 开启的服务 ComponentName 集合
      */
     public static Set<ComponentName> getEnabledServices(Context context) {
         String settingValue = Settings.Secure.getString(context.getContentResolver(), SETTING_KEY);
-        if (TextUtils.isEmpty(settingValue)) {
-            return new HashSet<>();
-        }
         Set<ComponentName> enabledServices = new HashSet<>();
+
+        if (TextUtils.isEmpty(settingValue)) {
+            return enabledServices;
+        }
+
         COLON_SPLITTER.setString(settingValue);
         while (COLON_SPLITTER.hasNext()) {
             String componentNameString = COLON_SPLITTER.next();
@@ -35,7 +46,10 @@ public class AccessibilityUtils {
     }
 
     /**
-     * 安全写入 Settings
+     * 将服务集合写入系统设置 (需要 WRITE_SECURE_SETTINGS 权限)
+     *
+     * @param context  上下文
+     * @param services 要开启的所有服务的集合
      */
     public static void setEnabledServices(Context context, Set<ComponentName> services) {
         StringBuilder sb = new StringBuilder();
@@ -53,7 +67,7 @@ public class AccessibilityUtils {
     }
 
     /**
-     * 判断某个服务是否开启
+     * 判断某个服务是否已开启
      */
     public static boolean isServiceEnabled(Context context, String serviceId) {
         ComponentName target = ComponentName.unflattenFromString(serviceId);
@@ -62,30 +76,46 @@ public class AccessibilityUtils {
     }
 
     /**
-     * 开启指定服务
+     * 开启指定服务 (追加到现有列表)
      */
     public static void enableService(Context context, String serviceId) {
         ComponentName componentName = ComponentName.unflattenFromString(serviceId);
         if (componentName == null) return;
 
         Set<ComponentName> enabledServices = getEnabledServices(context);
-        // 如果集合中加入了新元素（即原本没开启），则写入设置
         if (enabledServices.add(componentName)) {
             setEnabledServices(context, enabledServices);
         }
     }
 
     /**
-     * 关闭指定服务
+     * 关闭指定服务 (从现有列表移除)
      */
     public static void disableService(Context context, String serviceId) {
         ComponentName componentName = ComponentName.unflattenFromString(serviceId);
         if (componentName == null) return;
 
         Set<ComponentName> enabledServices = getEnabledServices(context);
-        // 如果集合中移除了元素（即原本是开启的），则写入设置
         if (enabledServices.remove(componentName)) {
             setEnabledServices(context, enabledServices);
+        }
+    }
+
+    /**
+     * 尝试静默开启本应用的保活服务
+     * <p>
+     * 仅在已有权限且服务未开启时执行。
+     */
+    public static void tryEnableKeepAliveService(Context context) {
+        String serviceName = context.getPackageName() + "/" + KeepAliveAccessibilityService.class.getName();
+
+        if (!isServiceEnabled(context, serviceName)) {
+            try {
+                enableService(context, serviceName);
+                Log.i(TAG, "已自动静默开启保活服务: " + serviceName);
+            } catch (Exception e) {
+                Log.e(TAG, "自动开启保活服务失败", e);
+            }
         }
     }
 }
