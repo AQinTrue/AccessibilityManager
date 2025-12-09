@@ -1,8 +1,9 @@
 package com.accessibilitymanager;
 
+import android.Manifest;
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.annotation.SuppressLint;
-import android.app.ActivityManager; // 导入 ActivityManager
+import android.app.ActivityManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -30,6 +31,7 @@ import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.ListView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
@@ -52,6 +54,8 @@ import rikka.shizuku.Shizuku;
 public class MainActivity extends AppCompatActivity {
 
     private static final String TAG = "MainActivity";
+
+    private static final int REQUEST_CODE_POST_NOTIFICATIONS = 1001; // 权限请求码
 
     private List<AccessibilityServiceInfo> serviceList;
     private SharedPreferences sp;
@@ -80,6 +84,9 @@ public class MainActivity extends AppCompatActivity {
         initListView();
         initSettingsObserver();
         initShizukuListener();
+
+        // 检查并申请通知权限 (Android 13+)
+        checkNotificationPermission();
 
         // 尝试启动守护服务 (如果有权限)
         startDaemonService();
@@ -153,6 +160,27 @@ public class MainActivity extends AppCompatActivity {
                     PermissionUtils.runShizukuCommand(this);
                 }
             });
+        }
+    }
+
+    private void checkNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQUEST_CODE_POST_NOTIFICATIONS);
+            }
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQUEST_CODE_POST_NOTIFICATIONS) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                // 用户授权后，尝试重新启动服务以显示通知
+                startDaemonService();
+            } else {
+                Toast.makeText(this, "未授予通知权限，保活服务可能无法在前台显示", Toast.LENGTH_SHORT).show();
+            }
         }
     }
 
