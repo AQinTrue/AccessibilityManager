@@ -5,8 +5,11 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.BroadcastReceiver;
 import android.content.ComponentName;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.database.ContentObserver;
@@ -22,24 +25,41 @@ import java.util.HashSet;
 import java.util.Set;
 
 /**
- * 后台守护服务
+ * 后台守护服务 (增强版)
  * <p>
- * 核心功能：
- * 1. 监听系统 Settings 变化。
- * 2. 对比当前开启的服务与用户设定的保活列表。
- * 3. 自动拉起被意外关闭的服务。
+ * 新增特性：
+ * 1. 监听屏幕点亮/解锁广播：手机唤醒时立即检查。
+ * 2. 定时心跳机制：兜底防止 Observer 失效。
  */
 public class DaemonService extends Service {
     private static final String TAG = "DaemonService";
     private static final int NOTIFICATION_ID = 1001;
     private static final String CHANNEL_ID = "daemon_service_channel";
 
+    // 心跳间隔：60秒检查一次
+    private static final long HEARTBEAT_INTERVAL = 60 * 1000;
+
     private SettingsObserver mContentOb;
     private HandlerThread mWorkerThread;
-    private Handler mHandler; // 后台工作线程，处理耗时逻辑
-    private Handler mMainHandler; // 主线程，用于显示 Toast
+    private Handler mHandler;
+    private Handler mMainHandler;
     private SharedPreferences sp;
-    private boolean isSelfModification = false; // 标志位：防止修改设置引发的递归调用
+    private boolean isSelfModification = false;
+
+    // 屏幕广播接收器
+    private ScreenReceiver mScreenReceiver;
+
+    // 心跳任务
+    private final Runnable mHeartbeatRunnable = new Runnable() {
+        @Override
+        public void run() {
+            doDaemonCheck();
+            // 循环调用，保持心跳
+            if (mHandler != null) {
+                mHandler.postDelayed(this, HEARTBEAT_INTERVAL);
+            }
+        }
+    };
 
     @Override
     public void onCreate() {
@@ -47,7 +67,7 @@ public class DaemonService extends Service {
         sp = getSharedPreferences(AppConstants.PREFS_NAME, 0);
         mMainHandler = new Handler(getMainLooper());
 
-        // 1. 启动后台线程 (防止阻塞主线程)
+        // 1. 启动后台线程
         mWorkerThread = new HandlerThread("DaemonWorker");
         mWorkerThread.start();
         mHandler = new Handler(mWorkerThread.getLooper());
@@ -60,13 +80,29 @@ public class DaemonService extends Service {
                 mContentOb
         );
 
-        // 3. 开启前台服务通知 (保活必要手段)
+        // 3. 注册屏幕广播监听 (新增的关键部分)
+        registerScreenReceiver();
+
+        // 4. 开启前台服务通知
         startForegroundNotification();
 
-        // 4. 立即执行一次检查
+        // 5. 立即执行一次检查，并启动心跳
         mHandler.post(this::doDaemonCheck);
+        mHandler.postDelayed(mHeartbeatRunnable, HEARTBEAT_INTERVAL);
 
-        Log.i(TAG, "DaemonService 已启动，正在后台监控...");
+        Log.i(TAG, "DaemonService 已启动 (含屏幕监听与心跳)...");
+    }
+
+    /**
+     * 注册动态广播接收器监听屏幕状态
+     * 必须在代码中注册，Android 8.0+ 静态注册无效
+     */
+    private void registerScreenReceiver() {
+        mScreenReceiver = new ScreenReceiver();
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(Intent.ACTION_SCREEN_ON);     // 屏幕点亮
+        filter.addAction(Intent.ACTION_USER_PRESENT);  // 用户解锁
+        registerReceiver(mScreenReceiver, filter);
     }
 
     private void startForegroundNotification() {
@@ -118,12 +154,12 @@ public class DaemonService extends Service {
 
             // 如果保活列表中的服务未开启
             if (cn != null && !currentEnabled.contains(cn)) {
-                // 检查该服务应用是否存在 (防止应用被卸载后导致崩溃或无限循环)
                 try {
                     getPackageManager().getServiceInfo(cn, 0);
                     targetEnabled.add(cn);
                     needUpdate = true;
-                    restoredNames.append(cn.getPackageName()).append(" ");
+                    String label = getPackageManager().getApplicationLabel(getPackageManager().getApplicationInfo(cn.getPackageName(), 0)).toString();
+                    restoredNames.append(label).append(" ");
                 } catch (PackageManager.NameNotFoundException ignored) {
                     Log.w(TAG, "未找到应用，跳过保活: " + id);
                 }
@@ -152,14 +188,36 @@ public class DaemonService extends Service {
 
         @Override
         public void onChange(boolean selfChange) {
-            // 在 Handler 线程中执行检查
+            // Log.d(TAG, "Settings changed, trigger check");
+            mHandler.removeCallbacks(mHeartbeatRunnable); // 重置心跳计时
             mHandler.post(DaemonService.this::doDaemonCheck);
+            mHandler.postDelayed(mHeartbeatRunnable, HEARTBEAT_INTERVAL);
+        }
+    }
+
+    /**
+     * 屏幕广播接收器内部类
+     */
+    class ScreenReceiver extends BroadcastReceiver {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            String action = intent.getAction();
+            if (Intent.ACTION_SCREEN_ON.equals(action) || Intent.ACTION_USER_PRESENT.equals(action)) {
+                Log.i(TAG, "屏幕点亮/解锁，强制检查服务状态...");
+                if (mHandler != null) {
+                    mHandler.post(DaemonService.this::doDaemonCheck);
+                }
+            }
         }
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        return START_STICKY; // 服务被杀后尝试重启
+        // 每次 startService 也触发一次检查
+        if (mHandler != null) {
+            mHandler.post(this::doDaemonCheck);
+        }
+        return START_STICKY;
     }
 
     @Override
@@ -167,6 +225,12 @@ public class DaemonService extends Service {
         super.onDestroy();
         if (mContentOb != null) {
             getContentResolver().unregisterContentObserver(mContentOb);
+        }
+        if (mScreenReceiver != null) {
+            unregisterReceiver(mScreenReceiver);
+        }
+        if (mHandler != null) {
+            mHandler.removeCallbacksAndMessages(null);
         }
         if (mWorkerThread != null) {
             mWorkerThread.quitSafely();
