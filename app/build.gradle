@@ -8,9 +8,9 @@ android {
     defaultConfig {
         applicationId "com.accessibilitymanager"
         minSdk 18
-        targetSdk 33
-        versionCode 101
-        versionName "10.1"
+        targetSdk 35
+        versionCode 102
+        versionName "10.2"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -52,5 +52,6 @@ android {
 dependencies {
     implementation "dev.rikka.shizuku:api:13.1.0"
     implementation "dev.rikka.shizuku:provider:13.1.0"
-    implementation 'com.google.android.material:material:1.11.0'
+    // 为了支持 minSdk 18，必须将 material >= 1.9.0
+    implementation 'com.google.android.material:material:1.9.0'
 }
