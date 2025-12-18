@@ -1,0 +1,76 @@
+name: Android Release
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0 # 获取所有历史记录和标签以进行版本比对
+
+    - name: set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: gradle
+
+    - name: Grant execute permission for gradlew
+      run: chmod +x gradlew
+
+    - name: Get Version Name
+      id: get_version
+      run: |
+        VERSION_NAME=$(grep "versionName" app/build.gradle | awk -F'"' '{print $2}')
+        echo "version=$VERSION_NAME" >> $GITHUB_OUTPUT
+        echo "tag=v$VERSION_NAME" >> $GITHUB_OUTPUT
+
+    - name: Check if Tag exists
+      id: check_tag
+      run: |
+        if git rev-parse "${{ steps.get_version.outputs.tag }}" >/dev/null 2>&1; then
+          echo "exists=true" >> $GITHUB_OUTPUT
+          echo "Tag ${{ steps.get_version.outputs.tag }} already exists. Skipping release steps."
+        else
+          echo "exists=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Build Release APK
+      if: steps.check_tag.outputs.exists == 'false'
+      run: ./gradlew assembleRelease
+
+    - name: Sign APK
+      if: steps.check_tag.outputs.exists == 'false'
+      uses: r0adkll/sign-android-release@v1
+      id: sign_app
+      with:
+        releaseDirectory: app/build/outputs/apk/release
+        signingKeyBase64: ${{ secrets.SIGNING_KEY }}
+        alias: ${{ secrets.ALIAS }}
+        keyStorePassword: ${{ secrets.KEY_STORE_PASSWORD }}
+        keyPassword: ${{ secrets.KEY_PASSWORD }}
+
+    - name: Create Release
+      if: steps.check_tag.outputs.exists == 'false'
+      uses: softprops/action-gh-release@v2
+      with:
+        files: ${{ steps.sign_app.outputs.signedReleaseFile }}
+        name: Release v${{ steps.get_version.outputs.version }}
+        tag_name: ${{ steps.get_version.outputs.tag }}
+        body: |
+          ### 自动发布
+          - **版本**: ${{ steps.get_version.outputs.version }}
+          - **构建日期**: ${{ github.event.head_commit.timestamp }}
+          - **提交信息**: ${{ github.event.head_commit.message }}
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
