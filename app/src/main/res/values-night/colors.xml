@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="screen_background">#111015</color>
+    <color name="item_card_background">#1D1A24</color>
+    <color name="item_card_ripple">#33D6C2FF</color>
+</resources>

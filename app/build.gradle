@@ -54,4 +54,6 @@ dependencies {
     implementation "dev.rikka.shizuku:provider:13.1.0"
     // 为了支持 minSdk 18，必须将 material >= 1.9.0
     implementation 'com.google.android.material:material:1.9.0'
+
+    testImplementation 'junit:junit:4.13.2'
 }

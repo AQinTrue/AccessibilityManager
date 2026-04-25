@@ -24,6 +24,8 @@ import rikka.shizuku.Shizuku;
  */
 public class PermissionUtils {
 
+    public static final int REQUEST_CODE_SHIZUKU = 1002;
+
     private static final String TAG = "PermissionUtils";
 
     /**
@@ -48,17 +50,17 @@ public class PermissionUtils {
     public static void showPermissionDialog(Context context) {
         String cmd = "pm grant " + context.getPackageName() + " android.permission.WRITE_SECURE_SETTINGS";
         new MaterialAlertDialogBuilder(context)
-                .setTitle("需要权限")
-                .setMessage("本应用的核心功能（管理其他服务、自动保活）需要“写入安全设置”权限。\n\n请选择一种方式授权：")
-                .setPositiveButton("复制ADB命令", (dialog, i) -> {
+                .setTitle(R.string.permission_dialog_title)
+                .setMessage(R.string.permission_dialog_message)
+                .setPositiveButton(R.string.permission_dialog_action_copy_adb, (dialog, i) -> {
                     ClipboardManager cm = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
                     if (cm != null) {
                         cm.setPrimaryClip(ClipData.newPlainText("cmd", "adb shell " + cmd));
-                        Toast.makeText(context, "命令已复制到剪贴板，请连接电脑执行", Toast.LENGTH_SHORT).show();
+                        Toast.makeText(context, R.string.permission_dialog_copy_success, Toast.LENGTH_SHORT).show();
                     }
                 })
-                .setNegativeButton("Root授权", (dialog, i) -> runRootCommand(context, cmd))
-                .setNeutralButton("Shizuku授权", (dialog, i) -> requestShizukuPermission(context))
+                .setNegativeButton(R.string.permission_dialog_action_root, (dialog, i) -> runRootCommand(context, cmd))
+                .setNeutralButton(R.string.permission_dialog_action_shizuku, (dialog, i) -> requestShizukuPermission(context, REQUEST_CODE_SHIZUKU))
                 .show();
     }
 
@@ -75,13 +77,13 @@ public class PermissionUtils {
             o.flush();
             p.waitFor();
             if (p.exitValue() == 0) {
-                Toast.makeText(context, "Root授权成功，请重试操作", Toast.LENGTH_SHORT).show();
+                Toast.makeText(context, R.string.permission_dialog_root_success, Toast.LENGTH_SHORT).show();
             } else {
-                Toast.makeText(context, "Root授权失败，退出码：" + p.exitValue(), Toast.LENGTH_SHORT).show();
+                Toast.makeText(context, context.getString(R.string.permission_dialog_root_failed, p.exitValue()), Toast.LENGTH_SHORT).show();
             }
         } catch (Exception e) {
             Log.e(TAG, "Root command failed", e);
-            Toast.makeText(context, "Root不可用或请求被拒绝", Toast.LENGTH_SHORT).show();
+            Toast.makeText(context, R.string.permission_dialog_root_unavailable, Toast.LENGTH_SHORT).show();
         } finally {
             try {
                 if (o != null) o.close();
@@ -94,18 +96,18 @@ public class PermissionUtils {
     /**
      * 请求 Shizuku 权限
      */
-    private static void requestShizukuPermission(Context context) {
+    public static void requestShizukuPermission(Context context, int requestCode) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
         try {
             if (Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
                 runShizukuCommand(context);
             } else {
-                Shizuku.requestPermission(0);
+                Shizuku.requestPermission(requestCode);
                 // 授权结果将在 Activity 的 Listener 中回调
             }
         } catch (Exception e) {
             Log.e(TAG, "Shizuku not available", e);
-            Toast.makeText(context, "未检测到Shizuku或版本过低", Toast.LENGTH_SHORT).show();
+            Toast.makeText(context, R.string.permission_dialog_shizuku_unavailable, Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -118,9 +120,9 @@ public class PermissionUtils {
             Process p = Shizuku.newProcess(new String[]{"sh", "-c", cmd}, null, null);
             p.waitFor();
             if (p.exitValue() == 0) {
-                Toast.makeText(context, "Shizuku授权成功", Toast.LENGTH_SHORT).show();
+                Toast.makeText(context, R.string.permission_dialog_shizuku_success, Toast.LENGTH_SHORT).show();
             } else {
-                Toast.makeText(context, "Shizuku授权失败", Toast.LENGTH_SHORT).show();
+                Toast.makeText(context, R.string.permission_dialog_shizuku_failed, Toast.LENGTH_SHORT).show();
             }
         } catch (Exception e) {
             Log.e(TAG, "Shizuku command failed", e);

@@ -108,7 +108,7 @@ public class DaemonService extends Service {
     private void startForegroundNotification() {
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "保活服务", NotificationManager.IMPORTANCE_LOW);
+            NotificationChannel channel = new NotificationChannel(CHANNEL_ID, getString(R.string.daemon_notification_channel_name), NotificationManager.IMPORTANCE_LOW);
             channel.setShowBadge(false);
             if (nm != null) nm.createNotificationChannel(channel);
         }
@@ -117,9 +117,9 @@ public class DaemonService extends Service {
         PendingIntent pi = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE);
 
         Notification.Builder builder = new Notification.Builder(this)
-                .setSmallIcon(R.drawable.tile)
-                .setContentTitle("海绵宝宝，猜猜我有几颗糖~")
-                .setContentText("猜对了两颗都给你！")
+                .setSmallIcon(R.drawable.ic_stat_daemon)
+                .setContentTitle(getString(R.string.daemon_notification_title))
+                .setContentText(getString(R.string.daemon_notification_text))
                 .setContentIntent(pi);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -139,17 +139,15 @@ public class DaemonService extends Service {
             return;
         }
 
-        String daemonListStr = sp.getString(AppConstants.KEY_DAEMON_LIST, "");
-        if (daemonListStr.isEmpty()) return;
+        Set<String> daemonIds = DaemonListStore.readIds(sp);
+        if (daemonIds.isEmpty()) return;
 
         Set<ComponentName> currentEnabled = AccessibilityUtils.getEnabledServices(this);
         Set<ComponentName> targetEnabled = new HashSet<>(currentEnabled);
         boolean needUpdate = false;
         StringBuilder restoredNames = new StringBuilder();
 
-        String[] daemonArray = daemonListStr.split(":");
-        for (String id : daemonArray) {
-            if (id == null || id.isEmpty()) continue;
+        for (String id : daemonIds) {
             ComponentName cn = ComponentName.unflattenFromString(id);
 
             // 如果保活列表中的服务未开启
@@ -159,7 +157,7 @@ public class DaemonService extends Service {
                     targetEnabled.add(cn);
                     needUpdate = true;
                     String label = getPackageManager().getApplicationLabel(getPackageManager().getApplicationInfo(cn.getPackageName(), 0)).toString();
-                    restoredNames.append(label).append(" ");
+                    restoredNames.append(label).append(' ');
                 } catch (PackageManager.NameNotFoundException ignored) {
                     Log.w(TAG, "未找到应用，跳过保活: " + id);
                 }
@@ -172,7 +170,7 @@ public class DaemonService extends Service {
             AccessibilityUtils.setEnabledServices(this, targetEnabled);
 
             if (sp.getBoolean(AppConstants.KEY_SHOW_TOAST, true)) {
-                String msg = "已自动拉起: " + restoredNames;
+                String msg = getString(R.string.daemon_restore_toast, restoredNames.toString().trim());
                 mMainHandler.post(() -> Toast.makeText(getApplicationContext(), msg, Toast.LENGTH_SHORT).show());
             }
         }

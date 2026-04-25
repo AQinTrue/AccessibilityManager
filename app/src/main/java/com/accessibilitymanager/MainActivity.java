@@ -18,6 +18,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.provider.Settings;
+import android.text.TextUtils;
 import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.Menu;
@@ -37,6 +38,7 @@ import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.widget.Toolbar;
 
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.switchmaterial.SwitchMaterial;
 
 import java.util.ArrayList;
@@ -63,6 +65,7 @@ public class MainActivity extends AppCompatActivity {
     private ServiceAdapter adapter;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private ContentObserver settingsObserver;
+    private Shizuku.OnRequestPermissionResultListener shizukuPermissionListener;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -96,7 +99,7 @@ public class MainActivity extends AppCompatActivity {
         Toolbar toolbar = findViewById(R.id.toolbar);
         setSupportActionBar(toolbar);
         if (getSupportActionBar() != null) {
-            getSupportActionBar().setTitle("无障碍管理器");
+            getSupportActionBar().setTitle(R.string.app_name);
         }
     }
 
@@ -129,14 +132,18 @@ public class MainActivity extends AppCompatActivity {
             serviceList = new ArrayList<>();
         }
 
-        Collections.sort(serviceList, (o1, o2) -> {
-            boolean b1 = daemonListStr.contains(o1.getId());
-            boolean b2 = daemonListStr.contains(o2.getId());
-            return Boolean.compare(b2, b1);
-        });
+        sortServices();
 
         adapter = new ServiceAdapter();
         listView.setAdapter(adapter);
+    }
+
+    private void sortServices() {
+        Collections.sort(serviceList, (o1, o2) -> {
+            boolean firstPinned = DaemonListStore.containsId(daemonListStr, o1.getId());
+            boolean secondPinned = DaemonListStore.containsId(daemonListStr, o2.getId());
+            return Boolean.compare(secondPinned, firstPinned);
+        });
     }
 
     private void initSettingsObserver() {
@@ -155,11 +162,15 @@ public class MainActivity extends AppCompatActivity {
 
     private void initShizukuListener() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            Shizuku.addRequestPermissionResultListener((requestCode, grantResult) -> {
+            shizukuPermissionListener = (requestCode, grantResult) -> {
+                if (requestCode != PermissionUtils.REQUEST_CODE_SHIZUKU) {
+                    return;
+                }
                 if (grantResult == PackageManager.PERMISSION_GRANTED) {
                     PermissionUtils.runShizukuCommand(this);
                 }
-            });
+            };
+            Shizuku.addRequestPermissionResultListener(shizukuPermissionListener);
         }
     }
 
@@ -179,7 +190,7 @@ public class MainActivity extends AppCompatActivity {
                 // 用户授权后，尝试重新启动服务以显示通知
                 startDaemonService();
             } else {
-                Toast.makeText(this, "未授予通知权限，保活服务可能无法在前台显示", Toast.LENGTH_SHORT).show();
+                Toast.makeText(this, R.string.notification_permission_denied, Toast.LENGTH_SHORT).show();
             }
         }
     }
@@ -239,6 +250,9 @@ public class MainActivity extends AppCompatActivity {
         if (settingsObserver != null) {
             getContentResolver().unregisterContentObserver(settingsObserver);
         }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && shizukuPermissionListener != null) {
+            Shizuku.removeRequestPermissionResultListener(shizukuPermissionListener);
+        }
     }
 
     @Override
@@ -279,6 +293,14 @@ public class MainActivity extends AppCompatActivity {
         return super.onOptionsItemSelected(item);
     }
 
+    private void showServiceDescriptionDialog(String title, CharSequence description) {
+        new MaterialAlertDialogBuilder(this)
+                .setTitle(title)
+                .setMessage(description)
+                .setPositiveButton(R.string.dialog_close, null)
+                .show();
+    }
+
     class ServiceAdapter extends BaseAdapter {
         @Override
         public int getCount() {
@@ -302,11 +324,12 @@ public class MainActivity extends AppCompatActivity {
             if (convertView == null) {
                 convertView = LayoutInflater.from(MainActivity.this).inflate(R.layout.item, parent, false);
                 holder = new ViewHolder();
-                holder.nameTv = convertView.findViewById(R.id.b);
-                holder.descTv = convertView.findViewById(R.id.a);
-                holder.iconIv = convertView.findViewById(R.id.c);
-                holder.sw = convertView.findViewById(R.id.s);
-                holder.lockBtn = convertView.findViewById(R.id.ib);
+                holder.cardView = convertView.findViewById(R.id.card_view);
+                holder.serviceNameTv = convertView.findViewById(R.id.service_name);
+                holder.serviceDescTv = convertView.findViewById(R.id.service_desc);
+                holder.serviceIconIv = convertView.findViewById(R.id.service_icon);
+                holder.serviceSwitch = convertView.findViewById(R.id.service_switch);
+                holder.lockButton = convertView.findViewById(R.id.lock_button);
                 convertView.setTag(holder);
             } else {
                 holder = (ViewHolder) convertView.getTag();
@@ -317,53 +340,73 @@ public class MainActivity extends AppCompatActivity {
             ComponentName cn = ComponentName.unflattenFromString(id);
             PackageManager pm = getPackageManager();
 
-            String label = id;
+            String title = id;
+            holder.serviceIconIv.setImageResource(android.R.drawable.sym_def_app_icon);
             try {
+                CharSequence serviceLabel = info.getResolveInfo() != null
+                        ? info.getResolveInfo().loadLabel(pm)
+                        : null;
+                if (!TextUtils.isEmpty(serviceLabel)) {
+                    title = serviceLabel.toString();
+                } else if (cn != null) {
+                    title = pm.getApplicationLabel(pm.getApplicationInfo(cn.getPackageName(), 0)).toString();
+                }
                 if (cn != null) {
-                    label = pm.getApplicationLabel(pm.getApplicationInfo(cn.getPackageName(), 0)).toString();
-                    holder.iconIv.setImageDrawable(pm.getApplicationIcon(cn.getPackageName()));
+                    holder.serviceIconIv.setImageDrawable(pm.getApplicationIcon(cn.getPackageName()));
                 }
             } catch (PackageManager.NameNotFoundException e) {
-                holder.iconIv.setImageResource(android.R.drawable.sym_def_app_icon);
+                holder.serviceIconIv.setImageResource(android.R.drawable.sym_def_app_icon);
             }
-            holder.nameTv.setText(label);
-            holder.descTv.setText(info.loadDescription(pm));
+            CharSequence description = info.loadDescription(pm);
+            CharSequence fullDescription = TextUtils.isEmpty(description)
+                    ? getString(R.string.service_description_fallback)
+                    : description;
+
+            holder.serviceNameTv.setText(title);
+            holder.serviceDescTv.setText(fullDescription);
 
             boolean isEnabled = AccessibilityUtils.isServiceEnabled(MainActivity.this, id);
-            boolean isDaemon = daemonListStr.contains(id);
+            boolean isDaemon = DaemonListStore.containsId(daemonListStr, id);
+            final String dialogTitle = title;
+            final CharSequence dialogDescription = fullDescription;
 
-            holder.sw.setOnCheckedChangeListener(null);
-            holder.sw.setChecked(isEnabled);
+            holder.cardView.setOnClickListener(v -> showServiceDescriptionDialog(dialogTitle, dialogDescription));
 
-            holder.lockBtn.setVisibility(isEnabled ? View.VISIBLE : View.INVISIBLE);
-            holder.lockBtn.setImageResource(isDaemon ? R.drawable.lock1 : R.drawable.lock);
+            holder.serviceSwitch.setOnCheckedChangeListener(null);
+            holder.serviceSwitch.setChecked(isEnabled);
 
-            holder.sw.setOnClickListener(v -> {
+            holder.lockButton.setVisibility(isEnabled ? View.VISIBLE : View.INVISIBLE);
+            holder.lockButton.setImageResource(isDaemon ? R.drawable.lock1 : R.drawable.lock);
+            holder.lockButton.setContentDescription(
+                    getString(isDaemon ? R.string.lock_button_desc_locked : R.string.lock_button_desc_unlocked)
+            );
+
+            holder.serviceSwitch.setOnClickListener(v -> {
                 if (!PermissionUtils.hasSecureSettingsPermission(MainActivity.this)) {
-                    holder.sw.setChecked(!holder.sw.isChecked());
+                    holder.serviceSwitch.setChecked(!holder.serviceSwitch.isChecked());
                     PermissionUtils.showPermissionDialog(MainActivity.this);
                     return;
                 }
-                if (holder.sw.isChecked()) {
+                if (holder.serviceSwitch.isChecked()) {
                     AccessibilityUtils.enableService(MainActivity.this, id);
                     ensureKeepAliveService();
+                    holder.lockButton.setVisibility(View.VISIBLE);
                 } else {
                     if (isDaemon) {
                         updateDaemonList(id, false);
-                        holder.lockBtn.setImageResource(R.drawable.lock);
                     }
                     AccessibilityUtils.disableService(MainActivity.this, id);
+                    holder.lockButton.setVisibility(View.INVISIBLE);
                 }
             });
 
-            holder.lockBtn.setOnClickListener(v -> {
+            holder.lockButton.setOnClickListener(v -> {
                 if (!PermissionUtils.hasSecureSettingsPermission(MainActivity.this)) {
                     PermissionUtils.showPermissionDialog(MainActivity.this);
                     return;
                 }
-                boolean newStatus = !daemonListStr.contains(id);
+                boolean newStatus = !DaemonListStore.containsId(daemonListStr, id);
                 updateDaemonList(id, newStatus);
-                holder.lockBtn.setImageResource(newStatus ? R.drawable.lock1 : R.drawable.lock);
                 if (newStatus) {
                     startDaemonService();
                     ensureKeepAliveService();
@@ -373,20 +416,21 @@ public class MainActivity extends AppCompatActivity {
         }
 
         private void updateDaemonList(String id, boolean add) {
-            if (add) {
-                if (!daemonListStr.contains(id)) daemonListStr += id + ":";
-            } else {
-                daemonListStr = daemonListStr.replace(id + ":", "");
-            }
+            daemonListStr = add
+                    ? DaemonListStore.addId(daemonListStr, id)
+                    : DaemonListStore.removeId(daemonListStr, id);
             sp.edit().putString(AppConstants.KEY_DAEMON_LIST, daemonListStr).apply();
+            sortServices();
+            notifyDataSetChanged();
         }
     }
 
     static class ViewHolder {
-        TextView nameTv;
-        TextView descTv;
-        ImageView iconIv;
-        SwitchMaterial sw;
-        ImageButton lockBtn;
+        View cardView;
+        TextView serviceNameTv;
+        TextView serviceDescTv;
+        ImageView serviceIconIv;
+        SwitchMaterial serviceSwitch;
+        ImageButton lockButton;
     }
 }
